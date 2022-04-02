@@ -7,6 +7,7 @@ import pickle
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -20,6 +21,11 @@ T = TypeVar("T")
 RT = TypeVar("RT")
 
 logger = logging.getLogger(__name__)
+
+
+def trace(process_alias, msg, *args, **kwargs):
+    current_process = multiprocessing.current_process()
+    logger.debug(f'[{process_alias}] {msg} ({current_process}, pid={os.getpid()})', *args, **kwargs)
 
 
 class Status(Enum):
@@ -60,7 +66,7 @@ class Job:
     def start_listening(self):
         self.listener = mc.Listener('test.sock', family="AF_UNIX")
 
-        def conn_listener(listener: mc.Listener, conns: list[mc.Connection]):
+        def acceptor(listener: mc.Listener, conns: list[mc.Connection]):
             logger.debug("[WORKER] Started listener for task %s", self.id)
             while True:
                 conn = listener.accept()
@@ -68,7 +74,7 @@ class Job:
                 conns.append(conn)
 
         self.conn_listener = threading.Thread(
-            target=conn_listener, args=(self.listener, self.conns), daemon=True
+            target=acceptor, args=(self.listener, self.conns), daemon=True
         )
         self.conn_listener.start()
 
@@ -76,14 +82,8 @@ class Job:
         for conn in self.conns:
             conn.send(obj)
 
-    def start_work(self):
+    def start_work(self) -> Any:
         logger.debug("[WORKER] Job for %s starting from %s", self.id, multiprocessing.current_process())
-
-        print(self.task_fn)
-
-        # spec = inspect.signature(self.task_fn)
-
-        print(self.task_fn.__name__)
 
         recv, send = multiprocessing.Pipe()
 
@@ -95,7 +95,13 @@ class Job:
                     break
 
         threading.Thread(target=notifier, args=(recv, self), daemon=True).start()
-        self.notify(self.task_fn(*self.args, **self.kwargs, notifier=send)._getvalue())
+
+        # TODO: wait until thread started
+
+        result = self.task_fn(*self.args, **self.kwargs, notifier=send)._getvalue()
+        self.notify(result)
+
+        return result
 
         # for res in self.task_fn(*self.args, **self.kwargs):
         #     self.notify(res)
@@ -124,18 +130,17 @@ class ParsleyFuture(Generic[RT]):
 
 
 def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
-    logger.debug('[WORKER] Starting for %s with task %s (%s, pid=%s)', job_id, task_fn_name,
+    logger.debug('[WORKER] Init new job with id=%s with task_fn=%s (%s, pid=%s)', job_id, task_fn_name,
                  multiprocessing.current_process(), os.getpid())
     man = TaskManager(address="manager.sock")
     man.register(task_fn_name)
     man.connect()
 
     task_fn = getattr(man, task_fn_name)
-    print('foo', type(task_fn), dir(task_fn))
 
     job = Job(job_id, temp_socket_file, task_fn, args, kwargs)
     job.start_listening()
-    job.start_work()
+    return job.start_work()
 
 
 @dataclass
@@ -144,6 +149,9 @@ class Task:
     task_fn: str
 
     def __call__(self, *args, **kwargs) -> ParsleyFuture:
+        logger.debug('[OTHER] Task for %s called (%s, pid=%s)', self.task_fn, multiprocessing.current_process(),
+                     os.getpid())
+
         # create id
         job_id = uuid4()
 
@@ -152,7 +160,6 @@ class Task:
         temp_socket_file = temp_socket_file.with_suffix(".sock")
         temp_socket_file.touch(exist_ok=True)
 
-        print(f"submit {self.app_ref.executor}")
         future = self.app_ref.executor.submit(
             worker,
             job_id,
@@ -176,6 +183,8 @@ class TaskManager(BaseManager):
 def manager_worker(tasks, sock='manager.sock'):
     logger.debug('[MANAGER] Starting (%s, pid=%s)', multiprocessing.current_process(), os.getpid())
     m = TaskManager(sock)
+
+    print('worker', f'{hex(id(sys.modules))} {"sandbox" in sys.modules}')
 
     for task in tasks:
         task_fn = pickle.loads(task)
@@ -216,6 +225,7 @@ class Parsley:
     def start(self):
         logger.debug('[MAIN] Creating manager process')
         # self.manager.start()
+        print('main', f'{hex(id(sys.modules))} {"sandbox" in sys.modules}')
         p = multiprocessing.Process(target=manager_worker, args=(self.serialized_tasks,), daemon=True)
         p.start()
 
@@ -242,3 +252,22 @@ class Parsley:
     def close(self):
         self.sock_dir.rmdir()
         logger.debug("[MAIN] Shutting down Parsley")
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+
+    app = Parsley()
+
+
+    @app.task
+    def add_2(a, b, notifier: mc.Connection = None):
+        notifier.send(a + b)
+        return 42
+
+
+    app.start()
+    time.sleep(0.5)
+
+    res = add_2(2, 4)
+    res.wait()
