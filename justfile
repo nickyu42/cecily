@@ -1,0 +1,2 @@
+format:
+	black -S parsley/
