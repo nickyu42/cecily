@@ -23,6 +23,13 @@ RT = TypeVar("RT")
 logger = logging.getLogger(__name__)
 
 
+class Alias:
+    WORKER = 'WORKER'
+    MAIN = 'MAIN'
+    OTHER = 'OTHER'
+    MANAGER = 'MANAGER'
+
+
 def trace(process_alias, msg, *args, **kwargs):
     current_process = multiprocessing.current_process()
     logger.debug(f'[{process_alias}] {msg} ({current_process}, pid={os.getpid()})', *args, **kwargs)
@@ -53,7 +60,6 @@ class Job:
         kwargs: dict,
     ) -> None:
         super().__init__()
-
         self.id = job_id
         self.status = Status.READY
         self.socket_file = socket_file
@@ -62,19 +68,25 @@ class Job:
         self.kwargs = kwargs
         self.conns = []
         self.listener = None
+        self.acceptor_started_event = threading.Event()
 
     def start_listening(self):
         self.listener = mc.Listener('test.sock', family="AF_UNIX")
 
-        def acceptor(listener: mc.Listener, conns: list[mc.Connection]):
-            logger.debug("[WORKER] Started listener for task %s", self.id)
+        def acceptor(listener: mc.Listener, conns: list[mc.Connection], started: threading.Event):
+            logger.debug("[WORKER] started listener for task id=%s", self.id)
+
+            started.set()
+
             while True:
                 conn = listener.accept()
-                logger.debug("[WORKER] Accepted conn: %s", conn)
+                logger.debug("[WORKER] accepted conn: %s", conn)
                 conns.append(conn)
 
         self.conn_listener = threading.Thread(
-            target=acceptor, args=(self.listener, self.conns), daemon=True
+            target=acceptor,
+            args=(self.listener, self.conns, self.acceptor_started_event),
+            daemon=True
         )
         self.conn_listener.start()
 
@@ -83,31 +95,34 @@ class Job:
             conn.send(obj)
 
     def start_work(self) -> Any:
-        logger.debug("[WORKER] Job for %s starting from %s", self.id, multiprocessing.current_process())
+        trace(Alias.WORKER, 'job starting for id=%s', self.id)
+
+        started_evt = threading.Event()
 
         recv, send = multiprocessing.Pipe()
 
-        def notifier(conn, job):
+        def notifier(started, conn, job):
+            started.set()
+
             while True:
                 try:
                     job.notify(conn.recv())
                 except EOFError:
                     break
 
-        threading.Thread(target=notifier, args=(recv, self), daemon=True).start()
+        threading.Thread(target=notifier, args=(started_evt, recv, self), daemon=True).start()
 
-        # TODO: wait until thread started
+        # XXX: arbitrary wait
+        started_evt.wait(timeout=15)
 
-        result = self.task_fn(*self.args, **self.kwargs, notifier=send)._getvalue()
-        self.notify(result)
+        result = self.task_fn(*self.args, **self.kwargs, notifier=send)._getvalue()  # noqa
 
         return result
 
-        # for res in self.task_fn(*self.args, **self.kwargs):
-        #     self.notify(res)
-
-    # def close(self):
-    #     self.listener.close()
+    def execute(self) -> Any:
+        self.start_listening()
+        self.acceptor_started_event.wait()
+        return self.start_work()
 
 
 @dataclass
@@ -125,22 +140,22 @@ class ParsleyFuture(Generic[RT]):
             while True:
                 yield client.recv()
 
-    def wait(self) -> Any:
+    def result(self) -> Any:
         return self._future.result()
 
 
 def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
-    logger.debug('[WORKER] Init new job with id=%s with task_fn=%s (%s, pid=%s)', job_id, task_fn_name,
-                 multiprocessing.current_process(), os.getpid())
-    man = TaskManager(address="manager.sock")
-    man.register(task_fn_name)
-    man.connect()
+    trace(Alias.WORKER, 'init new job with task_fn=%s id=%s', task_fn_name, job_id)
 
-    task_fn = getattr(man, task_fn_name)
+    manager = TaskManager(address='manager.sock')
+    manager.register(task_fn_name)
+    manager.connect()
+
+    task_fn = getattr(manager, task_fn_name)
 
     job = Job(job_id, temp_socket_file, task_fn, args, kwargs)
-    job.start_listening()
-    return job.start_work()
+
+    return job.execute()
 
 
 @dataclass
@@ -149,8 +164,7 @@ class Task:
     task_fn: str
 
     def __call__(self, *args, **kwargs) -> ParsleyFuture:
-        logger.debug('[OTHER] Task for %s called (%s, pid=%s)', self.task_fn, multiprocessing.current_process(),
-                     os.getpid())
+        trace(Alias.OTHER, 'task for task_fn=%s called', self.task_fn)
 
         # create id
         job_id = uuid4()
@@ -169,9 +183,6 @@ class Task:
             args,
             kwargs,
         )
-        # future = self._app_ref.executor.submit(
-        #     worker, job_id, temp_socket_file, self.task_fn, args, kwargs
-        # )
 
         return ParsleyFuture(job_id, temp_socket_file, future)
 
@@ -181,16 +192,13 @@ class TaskManager(BaseManager):
 
 
 def manager_worker(tasks, sock='manager.sock'):
-    logger.debug('[MANAGER] Starting (%s, pid=%s)', multiprocessing.current_process(), os.getpid())
-    m = TaskManager(sock)
+    trace(Alias.MANAGER, 'starting')
 
-    print('worker', f'{hex(id(sys.modules))} {"sandbox" in sys.modules}')
+    m = TaskManager(sock)
 
     for task in tasks:
         task_fn = pickle.loads(task)
-        logger.debug('[MANAGER] Registering %s', task_fn.__name__)
-        # g = globals()
-        # g[task_fn.__name__] = task_fn
+        logger.debug('[MANAGER] registering %s', task_fn.__name__)
         m.register(task_fn.__name__, task_fn)
 
     s = m.get_server()
@@ -209,34 +217,28 @@ class Parsley:
     MODULE_NAME = 'sandbox'
 
     def __init__(self, max_workers: int | None = None) -> None:
-        logger.debug('[MAIN] Creating app (%s, pid=%s)', multiprocessing.current_process(), os.getpid())
+        trace(Alias.MAIN, 'creating app')
         self.executor = ProcessPoolExecutor(max_workers)
         self.sock_dir = Path(tempfile.mkdtemp())
-        self.manager = TaskManager(address="manager.sock")
 
-        logger.debug("[MAIN] Created sock dir: %s", self.sock_dir)
+        logger.debug("[MAIN] created sock dir: %s", self.sock_dir)
         self.manager_sock = self.sock_dir / "manager.sock"
+        self.manager_sock.touch(exist_ok=True)
+        self.manager = TaskManager(address='manager.sock')
 
-        logger.debug('[MAIN] Created module: %s', self.MODULE_NAME)
+        logger.debug('[MAIN] created module: %s', self.MODULE_NAME)
         sys.modules[self.MODULE_NAME] = ModuleType(self.MODULE_NAME)
 
         self.serialized_tasks = []
 
     def start(self):
-        logger.debug('[MAIN] Creating manager process')
-        # self.manager.start()
-        print('main', f'{hex(id(sys.modules))} {"sandbox" in sys.modules}')
+        logger.debug('[MAIN] creating manager process')
+
         p = multiprocessing.Process(target=manager_worker, args=(self.serialized_tasks,), daemon=True)
         p.start()
 
     def task(self, fn) -> Task:
-        logger.debug("[MAIN] Registering new task: %s", fn.__name__)
-
-        # print(fn.__module__, fn.__qualname__)
-        # print(sys.modules['tasks'])
-        #
-        # task_wrapper = type(fn.__name__, tuple(), {'execute': fn})
-        # globals()[fn.__name__] = task_wrapper
+        logger.debug("[MAIN] registering new task: %s", fn.__name__)
 
         fn.__module__ = self.MODULE_NAME
         setattr(sys.modules[self.MODULE_NAME], fn.__name__, fn)
@@ -244,14 +246,12 @@ class Parsley:
         self.serialized_tasks.append(pickle.dumps(fn))
 
         # TODO: no duplicate registers
-        # fn.apply = Task(self, fn.__name__)
-        # self.manager.register(fn.__name__, fn)
-        # TaskManager.register(fn.__name__, pickle.dumps(task_wrapper, pickle.HIGHEST_PROTOCOL))
+
         return Task(self, fn.__name__)
 
     def close(self):
         self.sock_dir.rmdir()
-        logger.debug("[MAIN] Shutting down Parsley")
+        logger.debug("[MAIN] shutting down app")
 
 
 if __name__ == '__main__':
@@ -270,4 +270,4 @@ if __name__ == '__main__':
     time.sleep(0.5)
 
     res = add_2(2, 4)
-    res.wait()
+    res.result()
