@@ -1,2 +1,2 @@
 format:
-	black -S parsley/
+	black -S cecily/ example/

@@ -1,9 +1,12 @@
 [tool.poetry]
-name = "parsley"
+name = "cecily"
 version = "0.1.0"
 description = "Minimalistic task queue using just the stdlib"
 authors = ["Nick Yu <nickyu42@gmail.com>"]
 license = "MIT"
+packages = [
+    { include = "cecily" },
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"

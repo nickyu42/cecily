@@ -1,13 +1,8 @@
-from asyncore import read
-from audioop import mul
 import concurrent.futures
-import functools
 import logging
 import multiprocessing
 import multiprocessing.connection as mc
 import os
-import pickle
-import sys
 import tempfile
 import threading
 import time
@@ -16,7 +11,6 @@ from dataclasses import dataclass
 from enum import Enum
 from multiprocessing.managers import BaseManager
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import UUID, uuid4
 
@@ -127,7 +121,7 @@ class Job:
 
 
 @dataclass
-class ParsleyFuture(Generic[RT]):
+class CecilyFuture(Generic[RT]):
     job_id: UUID
     socket_file: Path
 
@@ -161,10 +155,10 @@ def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
 
 @dataclass
 class Task:
-    app_ref: 'Parsley'
+    app_ref: 'Cecily'
     task_fn: Callable
 
-    def __call__(self, *args, **kwargs) -> ParsleyFuture:
+    def __call__(self, *args, **kwargs) -> CecilyFuture:
         trace(Alias.OTHER, 'task for task_fn=%s called', self.task_fn.__name__)
 
         # create id
@@ -185,7 +179,7 @@ class Task:
             kwargs,
         )
 
-        return ParsleyFuture(job_id, temp_socket_file, future)
+        return CecilyFuture(job_id, temp_socket_file, future)
 
 
 class TaskManager(BaseManager):
@@ -206,7 +200,7 @@ def manager_worker(deferred_functions, sock='manager.sock'):
     s.serve_forever()
 
 
-class Parsley:
+class Cecily:
     executor: ProcessPoolExecutor
     sock_dir: Path
 
@@ -247,20 +241,3 @@ class Parsley:
     def close(self):
         self.sock_dir.rmdir()
         logger.debug("[MAIN] shutting down app")
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-
-    app = Parsley()
-
-    @app.task
-    def add(a, b, notifier: mc.Connection = None):
-        notifier.send(a + b)
-        return 42
-
-    app.start()
-    time.sleep(0.5)
-
-    res = add.apply(2, 4)
-    res.result()
