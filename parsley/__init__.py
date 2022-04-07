@@ -1,4 +1,7 @@
+from asyncore import read
+from audioop import mul
 import concurrent.futures
+import functools
 import logging
 import multiprocessing
 import multiprocessing.connection as mc
@@ -84,9 +87,7 @@ class Job:
                 conns.append(conn)
 
         self.conn_listener = threading.Thread(
-            target=acceptor,
-            args=(self.listener, self.conns, self.acceptor_started_event),
-            daemon=True
+            target=acceptor, args=(self.listener, self.conns, self.acceptor_started_event), daemon=True
         )
         self.conn_listener.start()
 
@@ -136,7 +137,7 @@ class ParsleyFuture(Generic[RT]):
         if not self._future.running:
             return
 
-        with mc.Client('test.sock', family="AF_UNIX") as client:
+        with mc.Client(self.socket_file, family="AF_UNIX") as client:
             while True:
                 yield client.recv()
 
@@ -160,11 +161,11 @@ def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
 
 @dataclass
 class Task:
-    app_ref: "Parsley"
-    task_fn: str
+    app_ref: 'Parsley'
+    task_fn: Callable
 
     def __call__(self, *args, **kwargs) -> ParsleyFuture:
-        trace(Alias.OTHER, 'task for task_fn=%s called', self.task_fn)
+        trace(Alias.OTHER, 'task for task_fn=%s called', self.task_fn.__name__)
 
         # create id
         job_id = uuid4()
@@ -179,7 +180,7 @@ class Task:
             job_id,
             temp_socket_file,
             self.app_ref.manager_sock,
-            self.task_fn,
+            self.task_fn.__name__,
             args,
             kwargs,
         )
@@ -191,16 +192,16 @@ class TaskManager(BaseManager):
     pass
 
 
-def manager_worker(tasks, sock='manager.sock'):
+def manager_worker(deferred_functions, sock='manager.sock'):
     trace(Alias.MANAGER, 'starting')
 
     m = TaskManager(sock)
 
-    for task in tasks:
-        task_fn = pickle.loads(task)
-        logger.debug('[MANAGER] registering %s', task_fn.__name__)
-        m.register(task_fn.__name__, task_fn)
+    for task in deferred_functions:
+        logger.debug('[MANAGER] registering %s', task.__name__)
+        m.register(task.__name__, task)
 
+    trace(Alias.MANAGER, 'serving')
     s = m.get_server()
     s.serve_forever()
 
@@ -214,8 +215,6 @@ class Parsley:
 
     serialized_tasks: list[bytes]
 
-    MODULE_NAME = 'sandbox'
-
     def __init__(self, max_workers: int | None = None) -> None:
         trace(Alias.MAIN, 'creating app')
         self.executor = ProcessPoolExecutor(max_workers)
@@ -226,28 +225,24 @@ class Parsley:
         self.manager_sock.touch(exist_ok=True)
         self.manager = TaskManager(address='manager.sock')
 
-        logger.debug('[MAIN] created module: %s', self.MODULE_NAME)
-        sys.modules[self.MODULE_NAME] = ModuleType(self.MODULE_NAME)
-
-        self.serialized_tasks = []
+        self.deferred_functions = []
+        self.manager_worker = multiprocessing.Process(
+            target=manager_worker, args=(self.deferred_functions,), daemon=True
+        )
 
     def start(self):
-        logger.debug('[MAIN] creating manager process')
-
-        p = multiprocessing.Process(target=manager_worker, args=(self.serialized_tasks,), daemon=True)
-        p.start()
+        logger.debug('[MAIN] starting app')
+        self.manager_worker.start()
 
     def task(self, fn) -> Task:
         logger.debug("[MAIN] registering new task: %s", fn.__name__)
 
-        fn.__module__ = self.MODULE_NAME
-        setattr(sys.modules[self.MODULE_NAME], fn.__name__, fn)
-
-        self.serialized_tasks.append(pickle.dumps(fn))
+        fn.apply = Task(self, fn)
 
         # TODO: no duplicate registers
+        self.deferred_functions.append(fn)
 
-        return Task(self, fn.__name__)
+        return fn
 
     def close(self):
         self.sock_dir.rmdir()
@@ -259,15 +254,13 @@ if __name__ == '__main__':
 
     app = Parsley()
 
-
     @app.task
-    def add_2(a, b, notifier: mc.Connection = None):
+    def add(a, b, notifier: mc.Connection = None):
         notifier.send(a + b)
         return 42
-
 
     app.start()
     time.sleep(0.5)
 
-    res = add_2(2, 4)
+    res = add.apply(2, 4)
     res.result()
