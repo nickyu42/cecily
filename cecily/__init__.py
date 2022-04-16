@@ -3,9 +3,9 @@ import logging
 import multiprocessing
 import multiprocessing.connection as mc
 import os
+import shutil
 import tempfile
 import threading
-import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -68,7 +68,8 @@ class Job:
         self.acceptor_started_event = threading.Event()
 
     def start_listening(self):
-        self.listener = mc.Listener('test.sock', family="AF_UNIX")
+        trace(Alias.OTHER, 'socket path listener: %s', self.socket_file)
+        self.listener = mc.Listener(str(self.socket_file), family="AF_UNIX")
 
         def acceptor(listener: mc.Listener, conns: list[mc.Connection], started: threading.Event):
             logger.debug("[WORKER] started listener for task id=%s", self.id)
@@ -115,8 +116,9 @@ class Job:
         return result
 
     def execute(self) -> Any:
-        self.start_listening()
-        self.acceptor_started_event.wait()
+        # TODO: this causes error
+        # self.start_listening()
+        # self.acceptor_started_event.wait()
         return self.start_work()
 
 
@@ -131,7 +133,7 @@ class CecilyFuture(Generic[RT]):
         if not self._future.running:
             return
 
-        with mc.Client(self.socket_file, family="AF_UNIX") as client:
+        with mc.Client(str(self.socket_file), family="AF_UNIX") as client:
             while True:
                 yield client.recv()
 
@@ -209,8 +211,17 @@ class Cecily:
 
     serialized_tasks: list[bytes]
 
+    spawned: bool
+
     def __init__(self, max_workers: int | None = None) -> None:
+        current_process = multiprocessing.current_process()
+        if isinstance(current_process, multiprocessing.context.SpawnProcess):
+            self.spawned = True
+            trace(Alias.OTHER, 'skipping app init')
+            return
+
         trace(Alias.MAIN, 'creating app')
+        self.spawned = False
         self.executor = ProcessPoolExecutor(max_workers)
         self.sock_dir = Path(tempfile.mkdtemp())
 
@@ -225,10 +236,16 @@ class Cecily:
         )
 
     def start(self):
+        if self.spawned:
+            return
+
         logger.debug('[MAIN] starting app')
         self.manager_worker.start()
 
-    def task(self, fn) -> Task:
+    def task(self, fn) -> Callable:
+        if self.spawned:
+            return fn
+
         logger.debug("[MAIN] registering new task: %s", fn.__name__)
 
         fn.apply = Task(self, fn)
@@ -239,5 +256,13 @@ class Cecily:
         return fn
 
     def close(self):
-        self.sock_dir.rmdir()
+        shutil.rmtree(self.sock_dir)
+
+        self.manager.shutdown()
+
+        self.manager_worker.terminate()
+        self.manager_worker.join(timeout=10)
+
+        self.executor.shutdown(cancel_futures=True)
+
         logger.debug("[MAIN] shutting down app")

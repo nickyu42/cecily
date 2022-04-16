@@ -19,8 +19,11 @@ if __name__ == '__main__':
 
     futures = []
     for i in range(10):
-        q: CecilyFuture[int] = mandelbrot.apply(0, 1 + 1j * i)
+        time.sleep(0.1)
+        q: CecilyFuture[int] = mandelbrot.apply(0, 0.1 + 0.05j * i)
         futures.append(q)
 
     for f in futures:
         print(f.result())
+
+    app.close()
