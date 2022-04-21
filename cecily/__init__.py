@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import UUID, uuid4
 
-T = TypeVar("T")
-RT = TypeVar("RT")
+T = TypeVar('T')
+RT = TypeVar('RT')
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +69,16 @@ class Job:
 
     def start_listening(self):
         trace(Alias.OTHER, 'socket path listener: %s', self.socket_file)
-        self.listener = mc.Listener(str(self.socket_file), family="AF_UNIX")
+        self.listener = mc.Listener(str(self.socket_file), family='AF_UNIX')
 
         def acceptor(listener: mc.Listener, conns: list[mc.Connection], started: threading.Event):
-            logger.debug("[WORKER] started listener for task id=%s", self.id)
+            logger.debug('[WORKER] started listener for task id=%s', self.id)
 
             started.set()
 
             while True:
                 conn = listener.accept()
-                logger.debug("[WORKER] accepted conn: %s", conn)
+                logger.debug('[WORKER] accepted conn: %s', conn)
                 conns.append(conn)
 
         self.conn_listener = threading.Thread(
@@ -117,7 +117,7 @@ class Job:
 
     def execute(self) -> Any:
         # TODO: this causes error
-        # self.start_listening()
+        self.start_listening()
         # self.acceptor_started_event.wait()
         return self.start_work()
 
@@ -133,7 +133,7 @@ class CecilyFuture(Generic[RT]):
         if not self._future.running:
             return
 
-        with mc.Client(str(self.socket_file), family="AF_UNIX") as client:
+        with mc.Client(str(self.socket_file), family='AF_UNIX') as client:
             while True:
                 yield client.recv()
 
@@ -168,8 +168,7 @@ class Task:
 
         # create pub/sub conn
         temp_socket_file: Path = self.app_ref.sock_dir / str(job_id)
-        temp_socket_file = temp_socket_file.with_suffix(".sock")
-        temp_socket_file.touch(exist_ok=True)
+        temp_socket_file = temp_socket_file.with_suffix('.sock')
 
         future = self.app_ref.executor.submit(
             worker,
@@ -215,6 +214,9 @@ class Cecily:
 
     def __init__(self, max_workers: int | None = None) -> None:
         current_process = multiprocessing.current_process()
+
+        # XXX: determines if this app is called from the Main app's ProcessPoolExecutor
+        #   by checking if the current process is spawned
         if isinstance(current_process, multiprocessing.context.SpawnProcess):
             self.spawned = True
             trace(Alias.OTHER, 'skipping app init')
@@ -225,8 +227,8 @@ class Cecily:
         self.executor = ProcessPoolExecutor(max_workers)
         self.sock_dir = Path(tempfile.mkdtemp())
 
-        logger.debug("[MAIN] created sock dir: %s", self.sock_dir)
-        self.manager_sock = self.sock_dir / "manager.sock"
+        logger.debug('[MAIN] created sock dir: %s', self.sock_dir)
+        self.manager_sock = self.sock_dir / 'manager.sock'
         self.manager_sock.touch(exist_ok=True)
         self.manager = TaskManager(address='manager.sock')
 
@@ -246,7 +248,7 @@ class Cecily:
         if self.spawned:
             return fn
 
-        logger.debug("[MAIN] registering new task: %s", fn.__name__)
+        logger.debug('[MAIN] registering new task: %s', fn.__name__)
 
         fn.apply = Task(self, fn)
 
@@ -256,13 +258,11 @@ class Cecily:
         return fn
 
     def close(self):
-        shutil.rmtree(self.sock_dir)
-
-        self.manager.shutdown()
-
+        logger.debug('[MAIN] shutting down app')
         self.manager_worker.terminate()
         self.manager_worker.join(timeout=10)
 
         self.executor.shutdown(cancel_futures=True)
 
-        logger.debug("[MAIN] shutting down app")
+        shutil.rmtree(self.sock_dir)
+        logger.debug('[MAIN] shutdown complete')
