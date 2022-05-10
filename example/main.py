@@ -27,3 +27,5 @@ if __name__ == '__main__':
         print(f.result())
 
     app.close()
+
+    Path('./manager.sock').unlink(missing_ok=True)

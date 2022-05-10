@@ -118,7 +118,7 @@ class Job:
     def execute(self) -> Any:
         # TODO: this causes error
         self.start_listening()
-        # self.acceptor_started_event.wait()
+        self.acceptor_started_event.wait()
         return self.start_work()
 
 
@@ -144,7 +144,7 @@ class CecilyFuture(Generic[RT]):
 def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
     trace(Alias.WORKER, 'init new job with task_fn=%s id=%s', task_fn_name, job_id)
 
-    manager = TaskManager(address='manager.sock')
+    manager = TaskManager(address=str(manager_sock))
     manager.register(task_fn_name)
     manager.connect()
 
@@ -187,10 +187,10 @@ class TaskManager(BaseManager):
     pass
 
 
-def manager_worker(deferred_functions, sock='manager.sock'):
+def manager_worker(deferred_functions: list[Callable], sock: Path):
     trace(Alias.MANAGER, 'starting')
 
-    m = TaskManager(sock)
+    m = TaskManager(str(sock))
 
     for task in deferred_functions:
         logger.debug('[MANAGER] registering %s', task.__name__)
@@ -205,7 +205,6 @@ class Cecily:
     executor: ProcessPoolExecutor
     sock_dir: Path
 
-    manager: TaskManager | None
     manager_sock: Path
 
     serialized_tasks: list[bytes]
@@ -229,12 +228,10 @@ class Cecily:
 
         logger.debug('[MAIN] created sock dir: %s', self.sock_dir)
         self.manager_sock = self.sock_dir / 'manager.sock'
-        self.manager_sock.touch(exist_ok=True)
-        self.manager = TaskManager(address='manager.sock')
 
         self.deferred_functions = []
         self.manager_worker = multiprocessing.Process(
-            target=manager_worker, args=(self.deferred_functions,), daemon=True
+            target=manager_worker, args=(self.deferred_functions, self.manager_sock), daemon=True
         )
 
     def start(self):
