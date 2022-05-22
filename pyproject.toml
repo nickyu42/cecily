@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "cecily"
-version = "0.1.0"
+version = "0.1.1"
 description = "Minimalistic task queue using just the stdlib"
 authors = ["Nick Yu <nickyu42@gmail.com>"]
 license = "MIT"
