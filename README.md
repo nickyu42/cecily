@@ -1,5 +1,9 @@
 ### Cecily
 
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/cecily)
+![PyPI](https://img.shields.io/pypi/v/cecily)
+![PyPI - License](https://img.shields.io/pypi/l/cecily)
+
 Cecily is a minimalistic task queue for Python.
 
 Features:
@@ -8,6 +12,12 @@ Features:
 - No broker necessary
 
 ### Get started
+
+```console
+$ pip install cecily
+```
+
+**Example usage**
 
 ```python
 import time
