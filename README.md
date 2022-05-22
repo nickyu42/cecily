@@ -1,8 +1,8 @@
 ### Cecily
 
-![PyPI - Python Version](https://img.shields.io/pypi/pyversions/cecily)
-![PyPI](https://img.shields.io/pypi/v/cecily)
-![PyPI - License](https://img.shields.io/pypi/l/cecily)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/cecily)](https://pypi.org/project/cecily/)
+[![PyPI](https://img.shields.io/pypi/v/cecily)](https://pypi.org/project/cecily/)
+[![PyPI - License](https://img.shields.io/pypi/l/cecily)](https://pypi.org/project/cecily/)
 
 Cecily is a minimalistic task queue for Python.
 
