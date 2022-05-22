@@ -21,8 +21,6 @@ def long_running_task(x: int, notifier: Queue = None):
 
 
 if __name__ == '__main__':
-    app.start()
-
     futures = []
     for i in range(10):
         q: CecilyFuture[int] = long_running_task.apply(i)

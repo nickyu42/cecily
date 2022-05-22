@@ -10,29 +10,34 @@ Features:
 ### Get started
 
 ```python
+import time
 from cecily import Cecily, CecilyFuture
- 
+
 app = Cecily()
 
 
 @app.task
-def mandelbrot(z, c, n=40):
-    if abs(z) > 1000:
-        return float("nan")
-    elif n > 0:
-        return mandelbrot(z ** 2 + c, c, n - 1) 
-    else:
-        return z ** 2 + c
+def long_running_task(x: int, notifier):
+    for _ in range(5):
+        time.sleep(0.5)
+        print(f'hello from {x}')
+
+        notifier.put(x)
+
+    return x
 
 
 if __name__ == '__main__':
-    app.start()
-
     futures = []
     for i in range(10):
-        q: CecilyFuture[complex] = mandelbrot.apply(0, 1 + 1j * i)
+        q: CecilyFuture[int] = long_running_task.apply(i)
         futures.append(q)
+
+    for result in futures[0].collect():
+        print(result)
 
     for f in futures:
         print(f.result())
+
+    app.close()
 ```

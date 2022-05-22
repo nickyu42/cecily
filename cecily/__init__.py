@@ -1,4 +1,5 @@
 import concurrent.futures
+import inspect
 import logging
 import multiprocessing
 import os
@@ -75,7 +76,12 @@ class Job:
     def execute(self) -> Any:
         trace(Alias.WORKER, 'job starting for id=%s', self.id)
         self.status = Status.STARTED
-        result = self.task_fn(*self.args, **self.kwargs, notifier=self.queue)
+
+        parameters = inspect.signature(self.task_fn).parameters
+        if 'notifier' in parameters:
+            self.kwargs['notifier'] = self.queue
+
+        result = self.task_fn(*self.args, **self.kwargs)
 
         self.queue.put(JOB_FINISHED)
         self.status = Status.DONE
@@ -170,15 +176,7 @@ class Cecily:
         self.spawned = False
         self.executor = ProcessPoolExecutor(max_workers)
 
-        self.manager = SyncManager(address='manager.sock')
-
-    def start(self):
-        if self.spawned:
-            return
-
-        self.manager.start()
-
-        logger.debug('[MAIN] starting app')
+        self.manager = multiprocessing.Manager()
 
     def task(self, fn) -> CecilyTask:
         if self.spawned:
