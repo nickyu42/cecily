@@ -1,7 +1,6 @@
 import logging
 import time
-from multiprocessing.connection import Connection
-from pathlib import Path
+from multiprocessing import Queue
 
 from cecily import Cecily, CecilyFuture
 
@@ -11,20 +10,18 @@ app = Cecily(max_workers=10)
 
 
 @app.task
-def long_running_task(x: int, notifier: Connection = None):
+def long_running_task(x: int, notifier: Queue = None):
     for _ in range(5):
         time.sleep(0.5)
         print(f'hello from {x}')
+
+        notifier.put(x)
 
     return x
 
 
 if __name__ == '__main__':
-    Path('./manager.sock').unlink(missing_ok=True)
-
     app.start()
-
-    time.sleep(0.1)
 
     futures = []
     for i in range(10):
@@ -38,5 +35,3 @@ if __name__ == '__main__':
         print(f.result())
 
     app.close()
-
-    Path('./manager.sock').unlink(missing_ok=True)
