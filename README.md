@@ -1,4 +1,6 @@
-Minimalistic Task Queue for Python
+### Cecily
+
+Cecily is a minimalistic task queue for Python.
 
 Features:
 - No dependencies outside of standard library
@@ -8,8 +10,6 @@ Features:
 ### Get started
 
 ```python
-import math
-
 from cecily import Cecily, CecilyFuture
  
 app = Cecily()
@@ -25,7 +25,7 @@ def mandelbrot(z, c, n=40):
         return z ** 2 + c
 
 
-if __name__ == '__main__:
+if __name__ == '__main__':
     app.start()
 
     futures = []

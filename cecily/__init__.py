@@ -6,10 +6,10 @@ import os
 import shutil
 import tempfile
 import threading
+from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from multiprocessing.managers import BaseManager
 from pathlib import Path
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import UUID, uuid4
@@ -111,15 +111,16 @@ class Job:
         # XXX: arbitrary wait
         started_evt.wait(timeout=15)
 
-        result = self.task_fn(*self.args, **self.kwargs, notifier=send)._getvalue()  # noqa
+        result = self.task_fn(*self.args, **self.kwargs)  # noqa
 
         return result
 
     def execute(self) -> Any:
-        # TODO: this causes error
         self.start_listening()
         self.acceptor_started_event.wait()
-        return self.start_work()
+        result = self.start_work()
+        self.listener.close()
+        return result
 
 
 @dataclass
@@ -134,21 +135,33 @@ class CecilyFuture(Generic[RT]):
             return
 
         with mc.Client(str(self.socket_file), family='AF_UNIX') as client:
-            while True:
-                yield client.recv()
+            try:
+                def done_callback(_future):
+                    raise RuntimeError
+
+                self._future.add_done_callback(done_callback)
+
+                while not client.closed and self._future.running():
+                    yield client.recv()
+            finally:
+                pass
 
     def result(self) -> Any:
         return self._future.result()
 
 
-def worker(job_id, temp_socket_file, manager_sock, task_fn_name, args, kwargs):
+class CecilyTask(Callable, ABC):
+    @abstractmethod
+    def apply(self, *args, **kwargs) -> CecilyFuture:
+        ...
+
+    @abstractmethod
+    def __call__(self, *args, **kwargs):
+        ...
+
+
+def worker(task_fn, job_id, temp_socket_file, task_fn_name, args, kwargs):
     trace(Alias.WORKER, 'init new job with task_fn=%s id=%s', task_fn_name, job_id)
-
-    manager = TaskManager(address=str(manager_sock))
-    manager.register(task_fn_name)
-    manager.connect()
-
-    task_fn = getattr(manager, task_fn_name)
 
     job = Job(job_id, temp_socket_file, task_fn, args, kwargs)
 
@@ -172,33 +185,15 @@ class Task:
 
         future = self.app_ref.executor.submit(
             worker,
+            self.task_fn,
             job_id,
             temp_socket_file,
-            self.app_ref.manager_sock,
             self.task_fn.__name__,
             args,
             kwargs,
         )
 
         return CecilyFuture(job_id, temp_socket_file, future)
-
-
-class TaskManager(BaseManager):
-    pass
-
-
-def manager_worker(deferred_functions: list[Callable], sock: Path):
-    trace(Alias.MANAGER, 'starting')
-
-    m = TaskManager(str(sock))
-
-    for task in deferred_functions:
-        logger.debug('[MANAGER] registering %s', task.__name__)
-        m.register(task.__name__, task)
-
-    trace(Alias.MANAGER, 'serving')
-    s = m.get_server()
-    s.serve_forever()
 
 
 class Cecily:
@@ -226,22 +221,15 @@ class Cecily:
         self.executor = ProcessPoolExecutor(max_workers)
         self.sock_dir = Path(tempfile.mkdtemp())
 
-        logger.debug('[MAIN] created sock dir: %s', self.sock_dir)
-        self.manager_sock = self.sock_dir / 'manager.sock'
-
         self.deferred_functions = []
-        self.manager_worker = multiprocessing.Process(
-            target=manager_worker, args=(self.deferred_functions, self.manager_sock), daemon=True
-        )
 
     def start(self):
         if self.spawned:
             return
 
         logger.debug('[MAIN] starting app')
-        self.manager_worker.start()
 
-    def task(self, fn) -> Callable:
+    def task(self, fn) -> CecilyTask:
         if self.spawned:
             return fn
 
@@ -256,8 +244,6 @@ class Cecily:
 
     def close(self):
         logger.debug('[MAIN] shutting down app')
-        self.manager_worker.terminate()
-        self.manager_worker.join(timeout=10)
 
         self.executor.shutdown(cancel_futures=True)
 
